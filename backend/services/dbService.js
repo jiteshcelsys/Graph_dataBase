@@ -82,6 +82,11 @@ async function runQuery(connectionString, sql, dbSchema = 'public') {
     throw new Error('Only SELECT queries are permitted.');
   }
 
+  // Validate schema name — only allow alphanumeric + underscore, no injection possible
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(dbSchema)) {
+    throw new Error(`Invalid schema name: "${dbSchema}"`);
+  }
+
   const pool = createPool(connectionString);
   const client = await pool.connect();
   try {
