@@ -35,14 +35,15 @@ async function getSchema(connectionString, dbSchema = 'public') {
       `SELECT
         c.table_name,
         c.column_name,
-        c.data_type
+        c.data_type,
+        t.table_type AS object_type
       FROM information_schema.columns c
       JOIN information_schema.tables t
         ON t.table_name = c.table_name
        AND t.table_schema = c.table_schema
       WHERE c.table_schema = $1
-        AND t.table_type = 'BASE TABLE'
-      ORDER BY c.table_name, c.ordinal_position`,
+        AND t.table_type IN ('BASE TABLE', 'VIEW')
+      ORDER BY t.table_type, c.table_name, c.ordinal_position`,
       [dbSchema]
     );
     return result.rows;

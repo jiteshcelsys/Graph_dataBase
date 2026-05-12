@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import ReactECharts from 'echarts-for-react';
 
 const CHART_ICON = { bar: '▊', line: '↗', pie: '◉' };
@@ -7,6 +7,41 @@ const CHART_COLOR = { bar: '#667eea', line: '#91CC75', pie: '#FAC858' };
 export default function ChartCard({ insight, index, wide = false, compact = false }) {
   const { title, description, echartsConfig, queryError, noData, sql } = insight;
   const [sqlOpen, setSqlOpen] = useState(false);
+  const chartRef = useRef(null);
+
+  function downloadPNG() {
+    const url = chartRef.current?.getEchartsInstance()?.getDataURL({
+      type: 'png',
+      pixelRatio: 2,
+      backgroundColor: '#0f0f23',
+    });
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.replace(/\s+/g, '_')}.png`;
+    a.click();
+  }
+
+  function downloadCSV() {
+    const series = echartsConfig?.series?.[0];
+    if (!series) return;
+    let csv;
+    if (isPie) {
+      csv = 'label,value\n' +
+        series.data.map(d => `"${d.name}",${d.value}`).join('\n');
+    } else {
+      const labels = echartsConfig?.xAxis?.data || [];
+      const values = series.data || [];
+      csv = 'label,value\n' +
+        labels.map((l, i) => `"${l}",${values[i] ?? ''}`).join('\n');
+    }
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${title.replace(/\s+/g, '_')}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
 
   const chartType = echartsConfig?.series?.[0]?.type || 'bar';
   const isPie = chartType === 'pie';
@@ -117,7 +152,9 @@ export default function ChartCard({ insight, index, wide = false, compact = fals
           </div>
         ) : (
           <ReactECharts
+            ref={chartRef}
             option={finalConfig}
+            notMerge={true}
             style={{ height: wide ? '380px' : compact ? '200px' : '300px', width: '100%' }}
             opts={{ renderer: 'canvas' }}
           />
@@ -131,9 +168,11 @@ export default function ChartCard({ insight, index, wide = false, compact = fals
           {sqlOpen ? 'Hide' : 'View'} SQL Query
         </button>
         {!queryError && !noData && (
-          <span style={styles.rowsBadge}>
-            {insight.rowCount ?? '—'} rows
-          </span>
+          <div style={styles.exportRow}>
+            <button style={styles.exportBtn} onClick={downloadPNG} title="Download chart as PNG">PNG</button>
+            <button style={styles.exportBtn} onClick={downloadCSV} title="Download data as CSV">CSV</button>
+            <span style={styles.rowsBadge}>{insight.rowCount ?? '—'} rows</span>
+          </div>
         )}
       </div>
 
@@ -309,6 +348,24 @@ const styles = {
     borderRadius: '20px',
     fontFamily: 'monospace',
     letterSpacing: '0.5px',
+  },
+  exportRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  exportBtn: {
+    background: 'rgba(255,255,255,0.05)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: '10px',
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: '0.5px',
+    padding: '3px 10px',
+    borderRadius: '20px',
+    cursor: 'pointer',
+    transition: 'background 0.15s, color 0.15s',
   },
   sqlBlock: {
     margin: '0 22px 16px',

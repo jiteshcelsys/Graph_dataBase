@@ -5,6 +5,14 @@ const { StringOutputParser } = require('@langchain/core/output_parsers');
 const SYSTEM_PROMPT = `You are an expert PostgreSQL data analyst and dashboard generator.
 Given a PostgreSQL schema and column statistics, generate 5-7 meaningful business insights.
 
+SCHEMA NOTES:
+- Schema entries include both base tables (no flag) and views (flagged with "v":1).
+- Views are pre-defined queries and can be queried exactly like tables.
+- Prefer querying views when they expose aggregated or joined business data.
+- CRITICAL: Use ONLY the exact column names listed in the schema for each table or view.
+  Never guess, infer, or invent column names. If a view has columns "category" and "total_sales",
+  do not use "title" or any other name not present in the schema for that object.
+
 STRICT SQL RULES:
 - Only SELECT queries. No INSERT, UPDATE, DELETE, DROP.
 - NEVER nest aggregate functions. COUNT(DISTINCT CASE WHEN COUNT(...) ...) is FORBIDDEN.
@@ -86,8 +94,9 @@ async function generateInsights(schema, profile, dbSchema = 'public') {
   ]);
 
   // Compact schema: only table_name, column_name, data_type — no whitespace
-  const compactSchema = schema.map(({ table_name, column_name, data_type }) => ({
+  const compactSchema = schema.map(({ table_name, column_name, data_type, object_type }) => ({
     t: table_name, c: column_name, d: data_type,
+    ...(object_type === 'VIEW' ? { v: 1 } : {}),
   }));
   const schemaStr = JSON.stringify(compactSchema);
 
@@ -184,7 +193,8 @@ async function generateKPIs(schema, dbSchema = 'public') {
         .filter((c) => c.table_name === r.table_name)
         .map((c) => `${c.column_name}:${c.data_type}`)
         .join(',');
-      return `${r.table_name}(${cols})`;
+      const tag = r.object_type === 'VIEW' ? '[view]' : '';
+      return `${r.table_name}${tag}(${cols})`;
     })
   )].join(' | ');
 
@@ -209,4 +219,76 @@ async function generateKPIs(schema, dbSchema = 'public') {
   }
 }
 
-module.exports = { generateInsights, generateKPIs };
+// ── SQL self-correction ────────────────────────────────────────────────────────
+
+const CORRECTION_SYSTEM = `You are a PostgreSQL SQL debugger.
+Given a failed SQL query, its error message, and the actual database schema,
+return the corrected SQL query.
+Return ONLY the corrected SQL — no explanation, no markdown fences, no extra text.`;
+
+const CORRECTION_USER = `SCHEMA NAME: {dbSchema}
+
+RELEVANT SCHEMA (table: column(type), ...):
+{schemaContext}
+
+FAILED SQL:
+{sql}
+
+ERROR:
+{error}
+
+Rules:
+- Use ONLY column names listed above for each table
+- Qualify every table name as {dbSchema}.tablename
+- Preserve the original query intent and chart type
+- Return ONLY the corrected SQL`;
+
+async function correctSQL(failedSQL, errorMessage, schema, dbSchema) {
+  // Build focused schema context — only tables referenced in the failing SQL
+  const sqlLower = failedSQL.toLowerCase();
+  const relevantRows = schema.filter(r => sqlLower.includes(r.table_name.toLowerCase()));
+
+  const grouped = {};
+  for (const r of relevantRows) {
+    if (!grouped[r.table_name]) grouped[r.table_name] = [];
+    grouped[r.table_name].push(`${r.column_name}(${r.data_type})`);
+  }
+  const schemaContext = Object.entries(grouped)
+    .map(([t, cols]) => `${t}: ${cols.join(', ')}`)
+    .join('\n') || '(no matching tables found)';
+
+  const model = new ChatGroq({
+    apiKey: process.env.GROQ_API_KEY,
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.0,
+    maxTokens: 512,
+  });
+
+  const prompt = ChatPromptTemplate.fromMessages([
+    ['system', CORRECTION_SYSTEM],
+    ['human', CORRECTION_USER],
+  ]);
+  const messages = await prompt.formatMessages({ dbSchema, schemaContext, sql: failedSQL, error: errorMessage });
+
+  console.log(`[correction] Calling Groq to fix SQL…`);
+  const response = await Promise.race([
+    model.invoke(messages),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('correction timeout after 20s')), 20000)),
+  ]);
+
+  let corrected = (typeof response.content === 'string' ? response.content : String(response.content))
+    .trim()
+    .replace(/^```(?:sql)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+
+  const norm = corrected.toLowerCase();
+  if (!norm.startsWith('select') && !norm.startsWith('with')) {
+    throw new Error('LLM correction did not return a SELECT/WITH query');
+  }
+
+  console.log(`[correction] result: ${corrected.slice(0, 120)}…`);
+  return corrected;
+}
+
+module.exports = { generateInsights, generateKPIs, correctSQL };
